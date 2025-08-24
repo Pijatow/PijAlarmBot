@@ -241,27 +241,46 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /summary")
 
-    await update.message.reply_text("🔍 در حال دریافت خلاصه‌ای از بازار...")
+    await update.message.reply_text("🔍 در حال دریافت قیمت‌های درخواستی...")
     msg_logger.info(
-        f"OUTGOING -> User: {user_id}, Text: 'در حال دریافت خلاصه‌ای از بازار...'"
+        f"OUTGOING -> User: {user_id}, Text: 'در حال دریافت قیمت‌های درخواستی...'"
     )
 
+    # Define the specific list of cryptos to fetch
+    target_symbols = [
+        "BTCUSDT",
+        "ETHUSDT",
+        "XRPUSDT",
+        "BNBUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "TRXUSDT",
+        "ADAUSDT",
+        "AVAXUSDT",
+        "BCHUSDT",
+        "LINKUSDT",
+        "USDCUSDT",
+    ]
+
+    # The API might accept symbols as a comma-separated string
+    symbols_param = ",".join(target_symbols)
     url = f"{config.BITUNIX_API_URL}/futures/market/tickers"
-    api_logger.info(f"REQUEST -> summary_command: URL={url}")
+    params = {"symbols": symbols_param}
+    api_logger.info(f"REQUEST -> summary_command: URL={url}, Params={params}")
+
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, params=params, timeout=10)
         api_logger.info(f"RESPONSE -> summary_command: Status={response.status_code}")
         response.raise_for_status()
 
-        # Log the raw response for debugging
         raw_data = response.json()
         api_logger.info(
             f"RAW JSON RESPONSE -> summary_command:\n{json.dumps(raw_data, indent=2)}"
         )
 
-        all_tickers = raw_data.get("data", [])
+        tickers_data = raw_data.get("data", [])
 
-        if not all_tickers:
+        if not tickers_data:
             await update.message.reply_text(
                 "❌ اطلاعاتی از بازار دریافت نشد (API response empty)."
             )
@@ -270,35 +289,22 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        usdt_pairs = [
-            t
-            for t in all_tickers
-            if t.get("symbol", "").endswith("USDT") and t.get("turnover24h")
-        ]
-        api_logger.info(
-            f"Filtered {len(usdt_pairs)} USDT pairs from {len(all_tickers)} total tickers."
-        )
+        # Create a dictionary for quick price lookups
+        price_map = {ticker["symbol"]: ticker for ticker in tickers_data}
 
-        usdt_pairs.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-
-        top_10 = usdt_pairs[:10]
-
-        if not top_10:
-            await update.message.reply_text("❌ جفت‌ارزهای USDT برای نمایش یافت نشد.")
-            msg_logger.warning(
-                f"OUTGOING (FAIL) -> User: {user_id}, Reason: No USDT pairs found after filtering."
-            )
-            return
-
-        message_lines = ["📈 **خلاصه قیمت ۱۰ ارز برتر (بر اساس حجم معاملات):**\n"]
-        for pair in top_10:
-            symbol = pair.get("symbol", "N/A").replace("USDT", "-USDT")
-            price = float(pair.get("lastPrice", 0))
-            message_lines.append(f"🔹 **{symbol}:** `{price:,.4f}`")
+        message_lines = ["📈 **خلاصه قیمت ارزهای درخواستی:**\n"]
+        for symbol in target_symbols:
+            if symbol in price_map:
+                price = float(price_map[symbol].get("lastPrice", 0))
+                display_symbol = symbol.replace("USDT", "-USDT")
+                message_lines.append(f"🔹 **{display_symbol}:** `{price:,.4f}`")
+            else:
+                display_symbol = symbol.replace("USDT", "-USDT")
+                message_lines.append(f"🔸 **{display_symbol}:** `(N/A)`")
 
         final_message = "\n".join(message_lines)
         await update.message.reply_text(final_message, parse_mode="Markdown")
-        msg_logger.info(f"OUTGOING (SUCCESS) -> User: {user_id}, Sent summary.")
+        msg_logger.info(f"OUTGOING (SUCCESS) -> User: {user_id}, Sent custom summary.")
 
     except requests.RequestException as e:
         api_logger.error(f"RESPONSE ERROR -> summary_command: {e}")
@@ -334,7 +340,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     welcome_msg = f"""🔔 خوش آمدید به **Crypto Alarm Bot**! 🎉
 👋 سلام {user.first_name}!
-📌 برای مشاهده قیمت ۱۰ ارز برتر از دستور /summary استفاده کنید.
+📌 برای مشاهده قیمت ارزهای منتخب از دستور /summary استفاده کنید.
 👇🏼 یا یکی از گزینه‌های زیر را انتخاب کنید:"""
 
     if update.message:

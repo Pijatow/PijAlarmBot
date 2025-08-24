@@ -10,6 +10,7 @@ import config
 from ai_database_manager import DatabaseManager
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -108,13 +109,12 @@ class AlertManager:
 💰 **جفت ارز:** #{alert_data.get('pair', 'N/A')}
 📈 **نوع:** {translate_alert_type(alert_data.get('alert_type', 'N/A'))}
 💵 **قیمت:** {alert_data.get('price', 'N/A')}
-⏳ **تایم فریم:** {alert_data.get('timeframe', 'N/A')}
 📜 **متن:** {alert_data.get('alert_description', 'بدون متن')}
 """
 
     @staticmethod
     def format_trigger_message(
-        alert_data: Dict, trigger_reason: str, current_price: float
+        alert_data: Dict, trigger_reason: str, current_price: float, trigger_count: int
     ) -> str:
         """Formats the message sent when an alarm is triggered."""
         return f"""
@@ -126,6 +126,8 @@ class AlertManager:
 🎯 **قیمت هدف:** {alert_data['price']}
 📈 **قیمت فعلی:** {current_price}
 📜 **متن:** {alert_data['alert_description']}
+
+🔄 **تعداد تکرار:** {trigger_count}
 """
 
 
@@ -140,7 +142,10 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
 
     while True:
         try:
-            if not db.get_alert_by_id(user_id, alert_id):
+            # Re-fetch the latest alert data from DB in each loop
+            # This ensures we have the latest message_id and trigger_count
+            current_alert_state = db.get_alert_by_id(user_id, alert_id)
+            if not current_alert_state or not current_alert_state["is_active"]:
                 logger.info(f"Alert {alert_id} is no longer active. Stopping task.")
                 stop_alarm_task(alert_id)
                 break
@@ -150,44 +155,79 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                 params={"symbols": pair},
                 timeout=10,
             )
+
             if response.status_code == 200:
                 data = response.json().get("data")
                 if data:
                     current_price = float(data[0].get("lastPrice"))
-                    if last_price is not None:
-                        # Trigger condition for price crossing UP
-                        if last_price < target_price and current_price >= target_price:
-                            reason = f"📈 قیمت به بالای {target_price} رسید!"
-                            msg = AlertManager.format_trigger_message(
-                                alert_data, reason, current_price
-                            )
-                            await application.bot.send_message(user_id, msg)
+                    triggered = False
+                    reason = ""
 
-                        # Trigger condition for price crossing DOWN
+                    if last_price is not None:
+                        if last_price < target_price and current_price >= target_price:
+                            triggered = True
+                            reason = f"📈 قیمت به بالای {target_price} رسید!"
                         elif (
                             last_price > target_price and current_price <= target_price
                         ):
+                            triggered = True
                             reason = f"📉 قیمت به پایین {target_price} رسید!"
-                            msg = AlertManager.format_trigger_message(
-                                alert_data, reason, current_price
+
+                    if triggered:
+                        new_trigger_count = (
+                            current_alert_state.get("trigger_count", 0) + 1
+                        )
+                        msg_text = AlertManager.format_trigger_message(
+                            alert_data, reason, current_price, new_trigger_count
+                        )
+
+                        last_message_id = current_alert_state.get("last_message_id")
+                        new_message = None
+
+                        if last_message_id:
+                            try:
+                                # Try to EDIT the last message
+                                await application.bot.edit_message_text(
+                                    chat_id=user_id,
+                                    message_id=last_message_id,
+                                    text=msg_text,
+                                    parse_mode="Markdown",
+                                )
+                            except BadRequest as e:
+                                # If editing fails (e.g., message deleted), send a new one
+                                if "message to edit not found" in e.message.lower():
+                                    new_message = await application.bot.send_message(
+                                        user_id, msg_text, parse_mode="Markdown"
+                                    )
+                                else:
+                                    raise e
+                        else:
+                            # If no previous message, SEND a new one
+                            new_message = await application.bot.send_message(
+                                user_id, msg_text, parse_mode="Markdown"
                             )
-                            await application.bot.send_message(user_id, msg)
+
+                        # If we sent a new message, get its ID. Otherwise, keep the old one.
+                        message_id_to_save = (
+                            new_message.message_id if new_message else last_message_id
+                        )
+                        db.update_alert_trigger_info(alert_id, message_id_to_save)
+
                     last_price = current_price
-            await asyncio.sleep(5)  # Check every 5 seconds
+
+            await asyncio.sleep(15)  # Check every 15 seconds to avoid spamming edits
         except requests.RequestException as e:
             logger.error(f"Network error in price_alarm_monitor: {e}")
-            await asyncio.sleep(60)  # Wait longer on network errors
+            await asyncio.sleep(60)
         except Exception as e:
-            logger.error(f"Unexpected error in price_alarm_monitor: {e}")
-            stop_alarm_task(alert_id)  # Stop task on unexpected error
+            logger.error(
+                f"Unexpected error in price_alarm_monitor for alert {alert_id}: {e}"
+            )
+            stop_alarm_task(alert_id)
             break
 
 
 async def candle_alarm_monitor(application: Application, alert_data: Dict[str, Any]):
-    # This function would be similar to price_alarm_monitor
-    # but with logic to check candle closing prices.
-    # For brevity, the implementation is left as an exercise.
-    # Remember to handle API calls, errors, and task cancellation.
     pass
 
 
@@ -198,18 +238,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_user(user.id, user.username, user.first_name, is_allowed)
 
     if not is_allowed:
-        await update.message.reply_text("❌ شما اجازه استفاده از این ربات را ندارید.")
+        if update.message:
+            await update.message.reply_text(
+                "❌ شما اجازه استفاده از این ربات را ندارید."
+            )
         return ConversationHandler.END
 
     keyboard = [
         [InlineKeyboardButton("🔔 ایجاد آلارم جدید", callback_data="new_alert")],
         [InlineKeyboardButton("📋 مشاهده آلارم‌ها", callback_data="view_alerts")],
-        [InlineKeyboardButton("🗑 حذف همه آلارم‌ها", callback_data="delete_all_alerts")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     welcome_msg = f"""🔔 خوش آمدید به **Crypto Alarm Bot**! 🎉
 👋 سلام {user.first_name}!
 📌 لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"""
+
+    # Ensure we handle both message and callback_query updates correctly
     if update.message:
         await update.message.reply_text(
             welcome_msg, reply_markup=reply_markup, parse_mode="Markdown"
@@ -228,7 +272,11 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "new_alert":
         keyboard = [
             [InlineKeyboardButton("🔔 آلارم قیمت", callback_data="alert_price")],
-            [InlineKeyboardButton("🕯 آلارم کندل", callback_data="alert_candle")],
+            [
+                InlineKeyboardButton(
+                    "🕯 آلارم کندل (غیرفعال)", callback_data="alert_candle_disabled"
+                )
+            ],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
         ]
         await query.edit_message_text(
@@ -239,14 +287,6 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "view_alerts":
         return await view_alerts_list(update, context)
-
-    elif query.data == "delete_all_alerts":
-        # ... (implementation for delete all)
-        return DELETE_ALL_CONFIRMATION
-
-    elif query.data == "back_to_main":
-        await start(update, context)
-        return ConversationHandler.END
 
 
 async def view_alerts_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,19 +349,25 @@ async def delete_confirmation_handler(
     alert_id = int(query.data.split("_")[1])
     user_id = query.from_user.id
 
-    # Stop the background task *before* deleting from DB
+    alert_data = db.get_alert_by_id(user_id, alert_id)
     stop_alarm_task(alert_id)
-
     success, message = db.delete_user_alert(user_id, alert_id)
 
     if success:
         await query.edit_message_text(f"✅ {message}")
+        # Clean up by deleting the last alert message from the chat
+        if alert_data and alert_data.get("last_message_id"):
+            try:
+                await context.bot.delete_message(
+                    chat_id=user_id, message_id=alert_data["last_message_id"]
+                )
+            except BadRequest:
+                pass  # Ignore if message is already deleted
     else:
         await query.edit_message_text(f"❌ {message}")
 
-    # Go back to the list of alerts
     query.data = "view_alerts"
-    return await main_menu_handler(update, context)
+    return await view_alerts_list(update, context)
 
 
 async def alert_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,14 +405,10 @@ async def price_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def save_alert_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["alert_description"] = update.message.text.strip()
     context.user_data["user_id"] = update.effective_user.id
-
-    # Save to DB and get the new alert's ID
     alert_id = db.save_alert(context.user_data)
 
     if alert_id:
-        # Get the full alert data back from the DB
         full_alert_data = db.get_alert_by_id(context.user_data["user_id"], alert_id)
-        # Start the background task
         await start_alarm_task(context.application, full_alert_data)
         await update.message.reply_text(
             f"✅ آلارم با موفقیت ایجاد شد!\n\n{AlertManager.format_alert_details(context.user_data)}",
@@ -376,22 +418,17 @@ async def save_alert_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ خطا در ذخیره آلارم. لطفاً دوباره تلاش کنید.")
 
     context.user_data.clear()
-    await start(update, context)  # Return to main menu
+    await start(update, context)
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancels and ends the conversation."""
     await update.message.reply_text("❌ عملیات لغو شد.")
     context.user_data.clear()
     return ConversationHandler.END
 
 
 async def post_init(application: Application):
-    """
-    This function is called after the bot is initialized.
-    It reloads and restarts all active alarms from the database.
-    """
     logger.info("--- Reloading active alarms from database ---")
     active_alerts = db.get_all_active_alerts()
     count = 0
@@ -409,7 +446,7 @@ def main():
     application = (
         ApplicationBuilder()
         .token(config.TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)  # <-- This is the magic for persistence!
+        .post_init(post_init)
         .build()
     )
 
@@ -418,8 +455,7 @@ def main():
         states={
             MAIN_MENU: [
                 CallbackQueryHandler(
-                    main_menu_handler,
-                    pattern="^new_alert$|^view_alerts$|^delete_all_alerts$",
+                    main_menu_handler, pattern="^new_alert$|^view_alerts$"
                 )
             ],
             VIEW_ALERT: [
@@ -429,9 +465,7 @@ def main():
                 CallbackQueryHandler(delete_confirmation_handler, pattern="^delete_")
             ],
             ALERT_TYPE: [
-                CallbackQueryHandler(
-                    alert_type_handler, pattern="^alert_price$|^alert_candle$"
-                )
+                CallbackQueryHandler(alert_type_handler, pattern="^alert_price$")
             ],
             PAIR_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, pair_input_handler)
@@ -444,7 +478,7 @@ def main():
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(main_menu_handler, pattern="^back_to_main$"),
+            CallbackQueryHandler(start, pattern="^back_to_main$"),
             CommandHandler("cancel", cancel),
         ],
         allow_reentry=True,

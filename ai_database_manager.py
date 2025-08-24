@@ -15,6 +15,8 @@ ALLOWED_QUERY_FIELDS = [
     "created_at",
     "is_active",
     "candle_slope",
+    "trigger_count",
+    "last_message_id",
 ]
 
 
@@ -43,7 +45,8 @@ class DatabaseManager:
                     candle_slope TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_triggered TIMESTAMP,
-                    trigger_count_today INTEGER DEFAULT 0,
+                    trigger_count INTEGER DEFAULT 0,
+                    last_message_id INTEGER,
                     is_active BOOLEAN DEFAULT 1
                 )
             """
@@ -61,7 +64,9 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def add_user(self, user_id: int, username: str, first_name: str, is_allowed: bool):
+    def add_user(
+        self, user_id: int, username: str, first_name: str, is_allowed: bool
+    ):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -102,6 +107,24 @@ class DatabaseManager:
             conn.commit()
             return cursor.lastrowid  # Return the ID of the new alert
 
+    def update_alert_trigger_info(
+        self, alert_id: int, message_id: int
+    ):
+        """Increments the trigger count and updates the last message ID for an alert."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE alerts
+                SET trigger_count = trigger_count + 1,
+                    last_message_id = ?,
+                    last_triggered = ?
+                WHERE id = ?
+                """,
+                (message_id, datetime.now(), alert_id),
+            )
+            conn.commit()
+
     def get_user_alerts(self, user_id: int, fields: List[str]) -> List[Dict]:
         # --- SQL Injection Prevention ---
         # Validate every field against a whitelist before building the query.
@@ -134,7 +157,7 @@ class DatabaseManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM alerts WHERE user_id = ? AND id = ? AND is_active = 1",
+                "SELECT * FROM alerts WHERE user_id = ? AND id = ?",
                 (user_id, alert_id),
             )
             row = cursor.fetchone()

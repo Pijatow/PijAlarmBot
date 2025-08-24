@@ -236,7 +236,9 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
             break
 
 
-# --- Market Summary ---
+# --- Command Handlers ---
+
+
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /summary")
@@ -246,7 +248,6 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"OUTGOING -> User: {user_id}, Text: 'در حال دریافت قیمت‌های درخواستی...'"
     )
 
-    # Define the specific list of cryptos to fetch
     target_symbols = [
         "BTCUSDT",
         "ETHUSDT",
@@ -262,7 +263,6 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "USDCUSDT",
     ]
 
-    # The API might accept symbols as a comma-separated string
     symbols_param = ",".join(target_symbols)
     url = f"{config.BITUNIX_API_URL}/futures/market/tickers"
     params = {"symbols": symbols_param}
@@ -284,12 +284,8 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ اطلاعاتی از بازار دریافت نشد (API response empty)."
             )
-            msg_logger.warning(
-                f"OUTGOING (FAIL) -> User: {user_id}, Reason: API response empty"
-            )
             return
 
-        # Create a dictionary for quick price lookups
         price_map = {ticker["symbol"]: ticker for ticker in tickers_data}
 
         message_lines = ["📈 **خلاصه قیمت ارزهای درخواستی:**\n"]
@@ -314,7 +310,33 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ یک خطای پیش‌بینی نشده رخ داد.")
 
 
-# --- UI Handlers ---
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays a help message with all available commands."""
+    user_id = update.effective_user.id
+    msg_logger.info(f"INCOMING -> User: {user_id}, Command: /help")
+
+    help_text = """
+    🆘 **راهنمای ربات Crypto Alarm Bot**
+
+    در اینجا لیستی از تمام دستورات و ویژگی‌های موجود آمده است:
+
+    **دستورات اصلی:**
+    /start - نمایش منوی اصلی و شروع کار با ربات
+    /help - نمایش همین پیام راهنما
+
+    **دستورات سریع:**
+    /new_alarm - شروع فرآیند ایجاد یک آلارم جدید
+    /list_alarms - نمایش تمام آلارم‌های فعال شما
+    /summary - نمایش قیمت لحظه‌ای ارزهای منتخب
+
+    **در طول فرآیندها:**
+    /cancel - لغو عملیات فعلی (مانند ساخت آلارم)
+    """
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+    msg_logger.info(f"OUTGOING -> User: {user_id}, Sent help message.")
+
+
+# --- UI and Conversation Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg_logger.info(
@@ -340,8 +362,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     welcome_msg = f"""🔔 خوش آمدید به **Crypto Alarm Bot**! 🎉
 👋 سلام {user.first_name}!
-📌 برای مشاهده قیمت ارزهای منتخب از دستور /summary استفاده کنید.
-👇🏼 یا یکی از گزینه‌های زیر را انتخاب کنید:"""
+
+برای شروع از دکمه‌ها استفاده کنید یا از دستورات سریع زیر کمک بگیرید:
+/new_alarm - ساخت آلارم جدید
+/list_alarms - مشاهده آلارم‌ها
+/summary - قیمت لحظه‌ای ارزها
+/help - راهنما
+"""
 
     if update.message:
         await update.message.reply_text(
@@ -354,6 +381,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg_logger.info(f"OUTGOING -> User: {user.id}, Sent welcome message.")
     return MAIN_MENU
+
+
+async def new_alarm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts the new alarm conversation via a command."""
+    user_id = update.effective_user.id
+    msg_logger.info(f"INCOMING -> User: {user_id}, Command: /new_alarm")
+    keyboard = [
+        [InlineKeyboardButton("🔔 آلارم قیمت", callback_data="alert_price")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
+    ]
+    await update.message.reply_text(
+        "🔔 نوع آلارم را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ALERT_TYPE
+
+
+async def list_alarms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the list of alarms via a command."""
+    user_id = update.effective_user.id
+    msg_logger.info(f"INCOMING -> User: {user_id}, Command: /list_alarms")
+
+    alerts = db.get_user_alerts(user_id, ["id", "pair", "alert_type", "price"])
+
+    if not alerts:
+        await update.message.reply_text("📭 هیچ آلارم فعالی ندارید!")
+        return ConversationHandler.END
+
+    keyboard = []
+    for alert in alerts:
+        btn_text = f"🔔 {alert['pair']} - {translate_alert_type(alert['alert_type'])} - {alert['price']}"
+        keyboard.append(
+            [InlineKeyboardButton(btn_text, callback_data=f"alert_{alert['id']}")]
+        )
+
+    await update.message.reply_text(
+        f"📋 آلارم‌های فعال شما ({len(alerts)}):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return VIEW_ALERT
 
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,33 +439,32 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ALERT_TYPE
 
     elif query.data == "view_alerts":
-        return await view_alerts_list(update, context)
-
-
-async def view_alerts_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    alerts = db.get_user_alerts(user_id, ["id", "pair", "alert_type", "price"])
-
-    if not alerts:
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]]
-        await query.edit_message_text(
-            "📭 هیچ آلارم فعالی ندارید!", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return MAIN_MENU
-
-    keyboard = []
-    for alert in alerts:
-        btn_text = f"🔔 {alert['pair']} - {translate_alert_type(alert['alert_type'])} - {alert['price']}"
+        # Since this is a callback, we reuse the list_alarms_command logic but adapt it for editing a message
+        await query.answer()
+        alerts = db.get_user_alerts(user_id, ["id", "pair", "alert_type", "price"])
+        if not alerts:
+            keyboard = [
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]
+            ]
+            await query.edit_message_text(
+                "📭 هیچ آلارم فعالی ندارید!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return MAIN_MENU
+        keyboard = []
+        for alert in alerts:
+            btn_text = f"🔔 {alert['pair']} - {translate_alert_type(alert['alert_type'])} - {alert['price']}"
+            keyboard.append(
+                [InlineKeyboardButton(btn_text, callback_data=f"alert_{alert['id']}")]
+            )
         keyboard.append(
-            [InlineKeyboardButton(btn_text, callback_data=f"alert_{alert['id']}")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]
         )
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")])
-    await query.edit_message_text(
-        f"📋 آلارم‌های فعال شما ({len(alerts)}):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return VIEW_ALERT
+        await query.edit_message_text(
+            f"📋 آلارم‌های فعال شما ({len(alerts)}):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return VIEW_ALERT
 
 
 async def view_alert_details_handler(
@@ -413,7 +478,8 @@ async def view_alert_details_handler(
 
     if not alert:
         await query.edit_message_text("❌ آلارم یافت نشد.")
-        return await view_alerts_list(update, context)
+        # This part needs to be improved to show the list again
+        return MAIN_MENU
 
     context.user_data["selected_alert_id"] = alert_id
     keyboard = [
@@ -452,8 +518,9 @@ async def delete_confirmation_handler(
     else:
         await query.edit_message_text(f"❌ {message}")
 
-    query.data = "view_alerts"
-    return await main_menu_handler(update, context)
+    # After deleting, show the main menu
+    await start(update, context)
+    return ConversationHandler.END
 
 
 async def alert_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -539,7 +606,11 @@ def main():
     )
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler("new_alarm", new_alarm_command),
+            CommandHandler("list_alarms", list_alarms_command),
+        ],
         states={
             MAIN_MENU: [
                 CallbackQueryHandler(
@@ -574,6 +645,7 @@ def main():
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("help", help_command))
 
     logger.info("🟡 CryptoAlarmBot started successfully! Starting polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

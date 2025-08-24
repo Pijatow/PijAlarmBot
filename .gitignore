@@ -1,6 +1,9 @@
 *
+!migrations/
+!migrations/*
 !ai_database_manager.py
 !ai_telbot_alarm.py
+!config.py
 !LICENSE
 # Byte-compiled / optimized / DLL files
 __pycache__/

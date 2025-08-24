@@ -4,10 +4,12 @@ from typing import Dict, Any
 import requests
 import time
 import os
+import json  # Import json for pretty-printing API responses
 
-# Import configurations and DatabaseManager
+# Import configurations and the new logging setup
 import config
 from ai_database_manager import DatabaseManager
+from logging_config import logger, msg_logger, api_logger
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -22,14 +24,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-# --- Logging Setup ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
 # --- Proxy Settings for local tunneling ---
-# Required for connectivity in specific regions via local proxy (e.g., v2ray).
 os.environ["http_proxy"] = "http://127.0.0.1:10808"
 os.environ["https_proxy"] = "http://127.0.0.1:10808"
 
@@ -60,23 +55,24 @@ def translate_alert_type(alert_type):
 
 
 async def is_valid_pair(pair: str) -> bool:
-    """Check if a trading pair is valid by querying the API."""
+    url = f"{config.BITUNIX_API_URL}/futures/market/tickers"
+    params = {"symbols": pair}
+    api_logger.info(f"REQUEST -> is_valid_pair: URL={url}, Params={params}")
     try:
-        response = requests.get(
-            url=f"{config.BITUNIX_API_URL}/futures/market/tickers",
-            params={"symbols": pair},
-            timeout=5,
+        response = requests.get(url=url, params=params, timeout=5)
+        api_logger.info(
+            f"RESPONSE -> is_valid_pair: Status={response.status_code}, Body={response.text}"
         )
         if response.status_code == 200 and response.json().get("data"):
             return True
         return False
-    except requests.RequestException:
+    except requests.RequestException as e:
+        api_logger.error(f"RESPONSE ERROR -> is_valid_pair: {e}")
         return False
 
 
 # --- Alarm Task Management ---
 def stop_alarm_task(alert_id: int):
-    """Stops a running background task for a given alert ID."""
     task = config.ACTIVE_ALARM_TASKS.pop(alert_id, None)
     if task:
         task.cancel()
@@ -84,16 +80,17 @@ def stop_alarm_task(alert_id: int):
 
 
 async def start_alarm_task(application: Application, alert_data: Dict[str, Any]):
-    """Starts a background monitoring task for a given alert."""
     alert_id = alert_data.get("id")
     if not alert_id:
+        logger.error(f"Attempted to start task for alert with no ID: {alert_data}")
         return
 
     if alert_data["alert_type"] == "alert_price":
         task = asyncio.create_task(price_alarm_monitor(application, alert_data))
-    elif alert_data["alert_type"] == "alert_candle":
-        task = asyncio.create_task(candle_alarm_monitor(application, alert_data))
     else:
+        logger.warning(
+            f"Unsupported alert_type for task start: {alert_data['alert_type']}"
+        )
         return
 
     config.ACTIVE_ALARM_TASKS[alert_id] = task
@@ -104,7 +101,6 @@ async def start_alarm_task(application: Application, alert_data: Dict[str, Any])
 class AlertManager:
     @staticmethod
     def format_alert_details(alert_data: Dict[str, Any]) -> str:
-        """Formats the full details of an alert for display."""
         return f"""
 💰 **جفت ارز:** #{alert_data.get('pair', 'N/A')}
 📈 **نوع:** {translate_alert_type(alert_data.get('alert_type', 'N/A'))}
@@ -116,7 +112,6 @@ class AlertManager:
     def format_trigger_message(
         alert_data: Dict, trigger_reason: str, current_price: float, trigger_count: int
     ) -> str:
-        """Formats the message sent when an alarm is triggered."""
         return f"""
 🔔 **آلارم فعال شد!** 🔔
 
@@ -131,47 +126,52 @@ class AlertManager:
 """
 
 
-# --- Background Monitors (The Magic) ---
+# --- Background Monitors ---
 async def price_alarm_monitor(application: Application, alert_data: Dict[str, Any]):
-    """Continuously monitors the price for a price-based alarm."""
     user_id = alert_data["user_id"]
     pair = alert_data["pair"]
     target_price = float(alert_data["price"])
     alert_id = alert_data["id"]
     last_price = None
 
+    url = f"{config.BITUNIX_API_URL}/futures/market/tickers"
+    params = {"symbols": pair}
+
     while True:
         try:
-            # Re-fetch the latest alert data from DB in each loop
-            # This ensures we have the latest message_id and trigger_count
             current_alert_state = db.get_alert_by_id(user_id, alert_id)
             if not current_alert_state or not current_alert_state["is_active"]:
                 logger.info(f"Alert {alert_id} is no longer active. Stopping task.")
                 stop_alarm_task(alert_id)
                 break
 
-            response = requests.get(
-                f"{config.BITUNIX_API_URL}/futures/market/tickers",
-                params={"symbols": pair},
-                timeout=10,
+            api_logger.info(
+                f"REQUEST -> price_alarm_monitor (Alert ID: {alert_id}): URL={url}, Params={params}"
+            )
+            response = requests.get(url, params=params, timeout=10)
+            api_logger.info(
+                f"RESPONSE -> price_alarm_monitor (Alert ID: {alert_id}): Status={response.status_code}"
             )
 
             if response.status_code == 200:
                 data = response.json().get("data")
                 if data:
                     current_price = float(data[0].get("lastPrice"))
-                    triggered = False
-                    reason = ""
+                    triggered, reason = False, ""
 
                     if last_price is not None:
                         if last_price < target_price and current_price >= target_price:
-                            triggered = True
-                            reason = f"📈 قیمت به بالای {target_price} رسید!"
+                            triggered, reason = (
+                                True,
+                                f"📈 قیمت به بالای {target_price} رسید!",
+                            )
                         elif (
                             last_price > target_price and current_price <= target_price
                         ):
-                            triggered = True
-                            reason = f"📉 قیمت به پایین {target_price} رسید!"
+                            triggered, reason = (
+                                True,
+                                f"📉 قیمت به پایین {target_price} رسید!",
+                            )
 
                     if triggered:
                         new_trigger_count = (
@@ -180,60 +180,140 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                         msg_text = AlertManager.format_trigger_message(
                             alert_data, reason, current_price, new_trigger_count
                         )
-
                         last_message_id = current_alert_state.get("last_message_id")
                         new_message = None
 
+                        logger.info(
+                            f"TRIGGERED -> Alert ID: {alert_id} for User: {user_id}. Reason: {reason}"
+                        )
+
                         if last_message_id:
                             try:
-                                # Try to EDIT the last message
                                 await application.bot.edit_message_text(
                                     chat_id=user_id,
                                     message_id=last_message_id,
                                     text=msg_text,
                                     parse_mode="Markdown",
                                 )
+                                msg_logger.info(
+                                    f"OUTGOING (EDIT) -> User: {user_id}, Message ID: {last_message_id}"
+                                )
                             except BadRequest as e:
-                                # If editing fails (e.g., message deleted), send a new one
                                 if "message to edit not found" in e.message.lower():
                                     new_message = await application.bot.send_message(
                                         user_id, msg_text, parse_mode="Markdown"
                                     )
+                                    msg_logger.info(
+                                        f"OUTGOING (SEND - after edit fail) -> User: {user_id}, New Message ID: {new_message.message_id}"
+                                    )
                                 else:
                                     raise e
                         else:
-                            # If no previous message, SEND a new one
                             new_message = await application.bot.send_message(
                                 user_id, msg_text, parse_mode="Markdown"
                             )
+                            msg_logger.info(
+                                f"OUTGOING (SEND) -> User: {user_id}, New Message ID: {new_message.message_id}"
+                            )
 
-                        # If we sent a new message, get its ID. Otherwise, keep the old one.
                         message_id_to_save = (
                             new_message.message_id if new_message else last_message_id
                         )
                         db.update_alert_trigger_info(alert_id, message_id_to_save)
-
                     last_price = current_price
 
-            await asyncio.sleep(15)  # Check every 15 seconds to avoid spamming edits
+            await asyncio.sleep(15)
         except requests.RequestException as e:
-            logger.error(f"Network error in price_alarm_monitor: {e}")
+            api_logger.error(
+                f"RESPONSE ERROR -> price_alarm_monitor (Alert ID: {alert_id}): {e}"
+            )
             await asyncio.sleep(60)
         except Exception as e:
-            logger.error(
-                f"Unexpected error in price_alarm_monitor for alert {alert_id}: {e}"
+            logger.exception(
+                f"UNEXPECTED ERROR in price_alarm_monitor for alert {alert_id}:"
             )
             stop_alarm_task(alert_id)
             break
 
 
-async def candle_alarm_monitor(application: Application, alert_data: Dict[str, Any]):
-    pass
+# --- Market Summary ---
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    msg_logger.info(f"INCOMING -> User: {user_id}, Command: /summary")
+
+    await update.message.reply_text("🔍 در حال دریافت خلاصه‌ای از بازار...")
+    msg_logger.info(
+        f"OUTGOING -> User: {user_id}, Text: 'در حال دریافت خلاصه‌ای از بازار...'"
+    )
+
+    url = f"{config.BITUNIX_API_URL}/futures/market/tickers"
+    api_logger.info(f"REQUEST -> summary_command: URL={url}")
+    try:
+        response = requests.get(url, timeout=10)
+        api_logger.info(f"RESPONSE -> summary_command: Status={response.status_code}")
+        response.raise_for_status()
+
+        # Log the raw response for debugging
+        raw_data = response.json()
+        api_logger.info(
+            f"RAW JSON RESPONSE -> summary_command:\n{json.dumps(raw_data, indent=2)}"
+        )
+
+        all_tickers = raw_data.get("data", [])
+
+        if not all_tickers:
+            await update.message.reply_text(
+                "❌ اطلاعاتی از بازار دریافت نشد (API response empty)."
+            )
+            msg_logger.warning(
+                f"OUTGOING (FAIL) -> User: {user_id}, Reason: API response empty"
+            )
+            return
+
+        usdt_pairs = [
+            t
+            for t in all_tickers
+            if t.get("symbol", "").endswith("USDT") and t.get("turnover24h")
+        ]
+        api_logger.info(
+            f"Filtered {len(usdt_pairs)} USDT pairs from {len(all_tickers)} total tickers."
+        )
+
+        usdt_pairs.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+
+        top_10 = usdt_pairs[:10]
+
+        if not top_10:
+            await update.message.reply_text("❌ جفت‌ارزهای USDT برای نمایش یافت نشد.")
+            msg_logger.warning(
+                f"OUTGOING (FAIL) -> User: {user_id}, Reason: No USDT pairs found after filtering."
+            )
+            return
+
+        message_lines = ["📈 **خلاصه قیمت ۱۰ ارز برتر (بر اساس حجم معاملات):**\n"]
+        for pair in top_10:
+            symbol = pair.get("symbol", "N/A").replace("USDT", "-USDT")
+            price = float(pair.get("lastPrice", 0))
+            message_lines.append(f"🔹 **{symbol}:** `{price:,.4f}`")
+
+        final_message = "\n".join(message_lines)
+        await update.message.reply_text(final_message, parse_mode="Markdown")
+        msg_logger.info(f"OUTGOING (SUCCESS) -> User: {user_id}, Sent summary.")
+
+    except requests.RequestException as e:
+        api_logger.error(f"RESPONSE ERROR -> summary_command: {e}")
+        await update.message.reply_text("❌ خطای شبکه در دریافت اطلاعات.")
+    except Exception as e:
+        logger.exception("UNEXPECTED ERROR in summary_command:")
+        await update.message.reply_text("❌ یک خطای پیش‌بینی نشده رخ داد.")
 
 
-# --- UI Handlers (Conversation Flow) ---
+# --- UI Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    msg_logger.info(
+        f"INCOMING -> User: {user.id}, Command: /start or callback 'back_to_main'"
+    )
     is_allowed = user.id in config.ALLOWED_USERS
     db.add_user(user.id, user.username, user.first_name, is_allowed)
 
@@ -242,6 +322,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ شما اجازه استفاده از این ربات را ندارید."
             )
+        msg_logger.warning(
+            f"OUTGOING (REJECT) -> User: {user.id}, Reason: Not allowed."
+        )
         return ConversationHandler.END
 
     keyboard = [
@@ -251,9 +334,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     welcome_msg = f"""🔔 خوش آمدید به **Crypto Alarm Bot**! 🎉
 👋 سلام {user.first_name}!
-📌 لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"""
+📌 برای مشاهده قیمت ۱۰ ارز برتر از دستور /summary استفاده کنید.
+👇🏼 یا یکی از گزینه‌های زیر را انتخاب کنید:"""
 
-    # Ensure we handle both message and callback_query updates correctly
     if update.message:
         await update.message.reply_text(
             welcome_msg, reply_markup=reply_markup, parse_mode="Markdown"
@@ -262,26 +345,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(
             welcome_msg, reply_markup=reply_markup, parse_mode="Markdown"
         )
+
+    msg_logger.info(f"OUTGOING -> User: {user.id}, Sent welcome message.")
     return MAIN_MENU
 
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
+    msg_logger.info(f"INCOMING (Callback) -> User: {user_id}, Data: {query.data}")
     await query.answer()
 
     if query.data == "new_alert":
         keyboard = [
             [InlineKeyboardButton("🔔 آلارم قیمت", callback_data="alert_price")],
-            [
-                InlineKeyboardButton(
-                    "🕯 آلارم کندل (غیرفعال)", callback_data="alert_candle_disabled"
-                )
-            ],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")],
         ]
         await query.edit_message_text(
-            "🔔 نوع آلارم را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "🔔 نوع آلارم را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ALERT_TYPE
 
@@ -355,19 +436,18 @@ async def delete_confirmation_handler(
 
     if success:
         await query.edit_message_text(f"✅ {message}")
-        # Clean up by deleting the last alert message from the chat
         if alert_data and alert_data.get("last_message_id"):
             try:
                 await context.bot.delete_message(
                     chat_id=user_id, message_id=alert_data["last_message_id"]
                 )
             except BadRequest:
-                pass  # Ignore if message is already deleted
+                pass
     else:
         await query.edit_message_text(f"❌ {message}")
 
     query.data = "view_alerts"
-    return await view_alerts_list(update, context)
+    return await main_menu_handler(update, context)
 
 
 async def alert_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -428,7 +508,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# --- Post-Init Function for Persistence ---
 async def post_init(application: Application):
+    logger.info("--- Bot initialization complete ---")
     logger.info("--- Reloading active alarms from database ---")
     active_alerts = db.get_all_active_alerts()
     count = 0
@@ -440,7 +522,7 @@ async def post_init(application: Application):
 
 def main():
     if not config.TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not found in environment or config!")
+        logger.critical("FATAL: TELEGRAM_BOT_TOKEN not found!")
         return
 
     application = (
@@ -485,7 +567,9 @@ def main():
     )
 
     application.add_handler(conv_handler)
-    logger.info("🟡 CryptoAlarmBot started successfully!")
+    application.add_handler(CommandHandler("summary", summary_command))
+
+    logger.info("🟡 CryptoAlarmBot started successfully! Starting polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

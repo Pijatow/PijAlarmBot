@@ -3,6 +3,7 @@
 !migrations/*
 !ai_database_manager.py
 !ai_telbot_alarm.py
+!logging_config.py
 !config.py
 !LICENSE
 # Byte-compiled / optimized / DLL files

@@ -5,6 +5,7 @@
 !ai_telbot_alarm.py
 !logging_config.py
 !config.py
+!yoyo.ini
 !LICENSE
 # Byte-compiled / optimized / DLL files
 __pycache__/

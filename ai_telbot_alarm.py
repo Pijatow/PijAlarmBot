@@ -4,7 +4,8 @@ from typing import Dict, Any
 import requests
 import time
 import os
-import json  # Import json for pretty-printing API responses
+import json
+from textwrap import dedent
 
 # Import configurations and the new logging setup
 import config
@@ -24,10 +25,9 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-# --- Proxy Settings for local tunneling ---
+# --- Proxy Settings ---
 os.environ["http_proxy"] = "http://127.0.0.1:10808"
 os.environ["https_proxy"] = "http://127.0.0.1:10808"
-
 
 # --- Database Initialization ---
 db = DatabaseManager(config.DB_FILE)
@@ -38,20 +38,18 @@ db = DatabaseManager(config.DB_FILE)
     VIEW_ALERT,
     VIEW_ALERT_DETAILS,
     DELETE_CONFIRMATION,
-    DELETE_ALL_CONFIRMATION,
     ALERT_TYPE,
     PAIR_INPUT,
-    TIMEFRAME_INPUT,
     PRICE_INPUT,
-    CANDLE_SLOPE_INPUT,
     DESCRIPTION_INPUT,
-) = range(11)
+    UPDATE_SELECTION,
+    UPDATE_GET_VALUE,
+) = range(10)
 
 
-# --- Helper Functions ---
+# --- Helper Functions & Classes ---
 def translate_alert_type(alert_type):
-    translations = {"alert_price": "قیمت", "alert_candle": "کندل"}
-    return translations.get(alert_type, "ناشناخته")
+    return {"alert_price": "قیمت", "alert_candle": "کندل"}.get(alert_type, "ناشناخته")
 
 
 async def is_valid_pair(pair: str) -> bool:
@@ -69,6 +67,38 @@ async def is_valid_pair(pair: str) -> bool:
     except requests.RequestException as e:
         api_logger.error(f"RESPONSE ERROR -> is_valid_pair: {e}")
         return False
+
+
+class AlertManager:
+    @staticmethod
+    def format_alert_details(alert_data: Dict[str, Any]) -> str:
+        return dedent(
+            f"""
+            جفت ارز: #{alert_data.get('pair', 'N/A')}
+            نوع: {translate_alert_type(alert_data.get('alert_type', 'N/A'))}
+            قیمت: {alert_data.get('price', 'N/A')}
+            متن: {alert_data.get('alert_description', 'بدون متن')}
+        """
+        )
+
+    @staticmethod
+    def format_trigger_message(
+        alert_data: Dict, trigger_reason: str, current_price: float, trigger_count: int
+    ) -> str:
+        return dedent(
+            f"""
+            🔔 آلارم فعال شد! 🔔
+
+            {trigger_reason}
+
+            جفت ارز: #{alert_data['pair']}
+            قیمت هدف: {alert_data['price']}
+            قیمت فعلی: {current_price}
+            متن: {alert_data['alert_description']}
+
+            🔄 تعداد تکرار: {trigger_count}
+        """
+        )
 
 
 # --- Alarm Task Management ---
@@ -97,35 +127,6 @@ async def start_alarm_task(application: Application, alert_data: Dict[str, Any])
     logger.info(f"Started alarm task for alert_id: {alert_id}")
 
 
-# --- Alert Formatting ---
-class AlertManager:
-    @staticmethod
-    def format_alert_details(alert_data: Dict[str, Any]) -> str:
-        return f"""
-💰 **جفت ارز:** #{alert_data.get('pair', 'N/A')}
-📈 **نوع:** {translate_alert_type(alert_data.get('alert_type', 'N/A'))}
-💵 **قیمت:** {alert_data.get('price', 'N/A')}
-📜 **متن:** {alert_data.get('alert_description', 'بدون متن')}
-"""
-
-    @staticmethod
-    def format_trigger_message(
-        alert_data: Dict, trigger_reason: str, current_price: float, trigger_count: int
-    ) -> str:
-        return f"""
-🔔 **آلارم فعال شد!** 🔔
-
-{trigger_reason}
-
-💰 **جفت ارز:** #{alert_data['pair']}
-🎯 **قیمت هدف:** {alert_data['price']}
-📈 **قیمت فعلی:** {current_price}
-📜 **متن:** {alert_data['alert_description']}
-
-🔄 **تعداد تکرار:** {trigger_count}
-"""
-
-
 # --- Background Monitors ---
 async def price_alarm_monitor(application: Application, alert_data: Dict[str, Any]):
     user_id = alert_data["user_id"]
@@ -144,6 +145,8 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                 logger.info(f"Alert {alert_id} is no longer active. Stopping task.")
                 stop_alarm_task(alert_id)
                 break
+
+            target_price = float(current_alert_state["price"])
 
             api_logger.info(
                 f"REQUEST -> price_alarm_monitor (Alert ID: {alert_id}): URL={url}, Params={params}"
@@ -178,7 +181,10 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                             current_alert_state.get("trigger_count", 0) + 1
                         )
                         msg_text = AlertManager.format_trigger_message(
-                            alert_data, reason, current_price, new_trigger_count
+                            current_alert_state,
+                            reason,
+                            current_price,
+                            new_trigger_count,
                         )
                         last_message_id = current_alert_state.get("last_message_id")
                         new_message = None
@@ -193,7 +199,6 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                                     chat_id=user_id,
                                     message_id=last_message_id,
                                     text=msg_text,
-                                    parse_mode="Markdown",
                                 )
                                 msg_logger.info(
                                     f"OUTGOING (EDIT) -> User: {user_id}, Message ID: {last_message_id}"
@@ -201,7 +206,7 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                             except BadRequest as e:
                                 if "message to edit not found" in e.message.lower():
                                     new_message = await application.bot.send_message(
-                                        user_id, msg_text, parse_mode="Markdown"
+                                        user_id, msg_text
                                     )
                                     msg_logger.info(
                                         f"OUTGOING (SEND - after edit fail) -> User: {user_id}, New Message ID: {new_message.message_id}"
@@ -210,7 +215,7 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
                                     raise e
                         else:
                             new_message = await application.bot.send_message(
-                                user_id, msg_text, parse_mode="Markdown"
+                                user_id, msg_text
                             )
                             msg_logger.info(
                                 f"OUTGOING (SEND) -> User: {user_id}, New Message ID: {new_message.message_id}"
@@ -237,13 +242,13 @@ async def price_alarm_monitor(application: Application, alert_data: Dict[str, An
 
 
 # --- Command Handlers ---
-
-
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /summary")
 
-    await update.message.reply_text("🔍 در حال دریافت قیمت‌های درخواستی...")
+    loading_message = await update.message.reply_text(
+        "🔍 در حال دریافت قیمت‌های درخواستی..."
+    )
     msg_logger.info(
         f"OUTGOING -> User: {user_id}, Text: 'در حال دریافت قیمت‌های درخواستی...'"
     )
@@ -273,66 +278,59 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_logger.info(f"RESPONSE -> summary_command: Status={response.status_code}")
         response.raise_for_status()
 
-        raw_data = response.json()
-        api_logger.info(
-            f"RAW JSON RESPONSE -> summary_command:\n{json.dumps(raw_data, indent=2)}"
-        )
-
-        tickers_data = raw_data.get("data", [])
-
+        tickers_data = response.json().get("data", [])
         if not tickers_data:
-            await update.message.reply_text(
+            await loading_message.edit_text(
                 "❌ اطلاعاتی از بازار دریافت نشد (API response empty)."
             )
             return
 
         price_map = {ticker["symbol"]: ticker for ticker in tickers_data}
-
-        message_lines = ["📈 **خلاصه قیمت ارزهای درخواستی:**\n"]
+        message_lines = ["📈 خلاصه قیمت ارزهای درخواستی:\n"]
         for symbol in target_symbols:
+            display_symbol = symbol.replace("USDT", "-USDT")
             if symbol in price_map:
                 price = float(price_map[symbol].get("lastPrice", 0))
-                display_symbol = symbol.replace("USDT", "-USDT")
-                message_lines.append(f"🔹 **{display_symbol}:** `{price:,.4f}`")
+                # Format with commas and 4 decimal places
+                formatted_price = f"{price:,.4f}"
+                message_lines.append(f"🔹 {display_symbol}: {formatted_price}")
             else:
-                display_symbol = symbol.replace("USDT", "-USDT")
-                message_lines.append(f"🔸 **{display_symbol}:** `(N/A)`")
+                message_lines.append(f"🔸 {display_symbol}: (N/A)")
 
         final_message = "\n".join(message_lines)
-        await update.message.reply_text(final_message, parse_mode="Markdown")
-        msg_logger.info(f"OUTGOING (SUCCESS) -> User: {user_id}, Sent custom summary.")
+        await loading_message.edit_text(final_message)
+        msg_logger.info(f"OUTGOING (EDIT) -> User: {user_id}, Sent custom summary.")
 
     except requests.RequestException as e:
-        api_logger.error(f"RESPONSE ERROR -> summary_command: {e}")
-        await update.message.reply_text("❌ خطای شبکه در دریافت اطلاعات.")
+        await loading_message.edit_text("❌ خطای شبکه در دریافت اطلاعات.")
     except Exception as e:
         logger.exception("UNEXPECTED ERROR in summary_command:")
-        await update.message.reply_text("❌ یک خطای پیش‌بینی نشده رخ داد.")
+        await loading_message.edit_text("❌ یک خطای پیش‌بینی نشده رخ داد.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays a help message with all available commands."""
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /help")
+    help_text = dedent(
+        """
+        🆘 راهنمای ربات Crypto Alarm Bot
 
-    help_text = """
-    🆘 **راهنمای ربات Crypto Alarm Bot**
+        در اینجا لیستی از تمام دستورات و ویژگی‌های موجود آمده است:
 
-    در اینجا لیستی از تمام دستورات و ویژگی‌های موجود آمده است:
+        دستورات اصلی:
+        /start - نمایش منوی اصلی و شروع کار با ربات
+        /help - نمایش همین پیام راهنما
 
-    **دستورات اصلی:**
-    /start - نمایش منوی اصلی و شروع کار با ربات
-    /help - نمایش همین پیام راهنما
+        دستورات سریع:
+        /new_alarm - شروع فرآیند ایجاد یک آلارم جدید
+        /list_alarms - نمایش تمام آلارم‌های فعال شما
+        /summary - نمایش قیمت لحظه‌ای ارزهای منتخب
 
-    **دستورات سریع:**
-    /new_alarm - شروع فرآیند ایجاد یک آلارم جدید
-    /list_alarms - نمایش تمام آلارم‌های فعال شما
-    /summary - نمایش قیمت لحظه‌ای ارزهای منتخب
-
-    **در طول فرآیندها:**
-    /cancel - لغو عملیات فعلی (مانند ساخت آلارم)
+        در طول فرآیندها:
+        /cancel - لغو عملیات فعلی (مانند ساخت آلارم)
     """
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    )
+    await update.message.reply_text(help_text)
     msg_logger.info(f"OUTGOING -> User: {user_id}, Sent help message.")
 
 
@@ -350,9 +348,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ شما اجازه استفاده از این ربات را ندارید."
             )
-        msg_logger.warning(
-            f"OUTGOING (REJECT) -> User: {user.id}, Reason: Not allowed."
-        )
         return ConversationHandler.END
 
     keyboard = [
@@ -360,31 +355,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 مشاهده آلارم‌ها", callback_data="view_alerts")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    welcome_msg = f"""🔔 خوش آمدید به **Crypto Alarm Bot**! 🎉
-👋 سلام {user.first_name}!
+    welcome_msg = dedent(
+        f"""
+        🔔 خوش آمدید به Crypto Alarm Bot! 🎉
+        👋 سلام {user.first_name}!
 
-برای شروع از دکمه‌ها استفاده کنید یا از دستورات سریع زیر کمک بگیرید:
-/new_alarm - ساخت آلارم جدید
-/list_alarms - مشاهده آلارم‌ها
-/summary - قیمت لحظه‌ای ارزها
-/help - راهنما
-"""
+        برای شروع از دکمه‌ها استفاده کنید یا از دستورات سریع زیر کمک بگیرید:
+        /new_alarm - ساخت آلارم جدید
+        /list_alarms - مشاهده آلارم‌ها
+        /summary - قیمت لحظه‌ای ارزها
+        /help - راهنما
+    """
+    )
 
     if update.message:
-        await update.message.reply_text(
-            welcome_msg, reply_markup=reply_markup, parse_mode="Markdown"
-        )
+        await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
     elif update.callback_query:
         await update.callback_query.edit_message_text(
-            welcome_msg, reply_markup=reply_markup, parse_mode="Markdown"
+            welcome_msg, reply_markup=reply_markup
         )
-
     msg_logger.info(f"OUTGOING -> User: {user.id}, Sent welcome message.")
     return MAIN_MENU
 
 
 async def new_alarm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Starts the new alarm conversation via a command."""
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /new_alarm")
     keyboard = [
@@ -398,10 +392,8 @@ async def new_alarm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_alarms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the list of alarms via a command."""
     user_id = update.effective_user.id
     msg_logger.info(f"INCOMING -> User: {user_id}, Command: /list_alarms")
-
     alerts = db.get_user_alerts(user_id, ["id", "pair", "alert_type", "price"])
 
     if not alerts:
@@ -414,7 +406,6 @@ async def list_alarms_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard.append(
             [InlineKeyboardButton(btn_text, callback_data=f"alert_{alert['id']}")]
         )
-
     await update.message.reply_text(
         f"📋 آلارم‌های فعال شما ({len(alerts)}):",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -437,10 +428,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔔 نوع آلارم را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ALERT_TYPE
-
     elif query.data == "view_alerts":
-        # Since this is a callback, we reuse the list_alarms_command logic but adapt it for editing a message
-        await query.answer()
         alerts = db.get_user_alerts(user_id, ["id", "pair", "alert_type", "price"])
         if not alerts:
             keyboard = [
@@ -472,26 +460,76 @@ async def view_alert_details_handler(
 ):
     query = update.callback_query
     await query.answer()
-    alert_id = int(query.data.split("_")[1])
+
+    alert_id = int(query.data.split("_")[-1])
+
+    context.user_data["selected_alert_id"] = alert_id
     user_id = query.from_user.id
     alert = db.get_alert_by_id(user_id, alert_id)
 
     if not alert:
         await query.edit_message_text("❌ آلارم یافت نشد.")
-        # This part needs to be improved to show the list again
         return MAIN_MENU
 
-    context.user_data["selected_alert_id"] = alert_id
     keyboard = [
-        [InlineKeyboardButton("🗑 حذف آلارم", callback_data=f"delete_{alert_id}")],
+        [
+            InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{alert_id}"),
+            InlineKeyboardButton("✏️ ویرایش", callback_data=f"update_{alert_id}"),
+        ],
         [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="view_alerts")],
     ]
+    message_text = f"📋 جزئیات آلارم:\n{AlertManager.format_alert_details(alert)}"
     await query.edit_message_text(
-        f"📋 **جزئیات آلارم:**\n{AlertManager.format_alert_details(alert)}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
+        text=message_text, reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return DELETE_CONFIRMATION
+    return VIEW_ALERT_DETAILS
+
+
+async def alert_actions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action, alert_id_str = query.data.split("_")
+    alert_id = int(alert_id_str)
+    context.user_data["selected_alert_id"] = alert_id
+
+    if action == "delete":
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "✅ بله، حذف کن", callback_data=f"confirm_delete_{alert_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ لغو", callback_data=f"back_to_details_{alert_id}"
+                )
+            ],
+        ]
+        await query.edit_message_text(
+            "⚠️ آیا از حذف این آلارم اطمینان دارید؟",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return DELETE_CONFIRMATION
+    elif action == "update":
+        keyboard = [
+            [InlineKeyboardButton("💵 قیمت", callback_data="update_field_price")],
+            [
+                InlineKeyboardButton(
+                    "📜 متن", callback_data="update_field_alert_description"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔙 بازگشت", callback_data=f"back_to_details_{alert_id}"
+                )
+            ],
+        ]
+        await query.edit_message_text(
+            "کدام قسمت را می‌خواهید ویرایش کنید؟",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return UPDATE_SELECTION
 
 
 async def delete_confirmation_handler(
@@ -499,7 +537,8 @@ async def delete_confirmation_handler(
 ):
     query = update.callback_query
     await query.answer()
-    alert_id = int(query.data.split("_")[1])
+    action, alert_id_str = query.data.split("_")
+    alert_id = int(alert_id_str)
     user_id = query.from_user.id
 
     alert_data = db.get_alert_by_id(user_id, alert_id)
@@ -507,7 +546,7 @@ async def delete_confirmation_handler(
     success, message = db.delete_user_alert(user_id, alert_id)
 
     if success:
-        await query.edit_message_text(f"✅ {message}")
+        await query.edit_message_text(message)
         if alert_data and alert_data.get("last_message_id"):
             try:
                 await context.bot.delete_message(
@@ -516,9 +555,69 @@ async def delete_confirmation_handler(
             except BadRequest:
                 pass
     else:
-        await query.edit_message_text(f"❌ {message}")
+        await query.edit_message_text(message)
 
-    # After deleting, show the main menu
+    await start(update, context)
+    return ConversationHandler.END
+
+
+async def update_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    field_to_update = query.data.replace("update_field_", "")
+    context.user_data["field_to_update"] = field_to_update
+    prompt_text = {
+        "price": "💵 لطفاً قیمت جدید را وارد کنید:",
+        "alert_description": "📜 لطفاً متن جدید را وارد کنید:",
+    }
+    await query.edit_message_text(
+        prompt_text.get(field_to_update, "لطفاً مقدار جدید را وارد کنید:")
+    )
+    return UPDATE_GET_VALUE
+
+
+async def update_get_value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    alert_id = context.user_data.get("selected_alert_id")
+    field = context.user_data.get("field_to_update")
+    new_value = update.message.text
+
+    if not all([alert_id, field]):
+        await update.message.reply_text(
+            "❌ خطا: اطلاعات ویرایش یافت نشد. لطفاً دوباره تلاش کنید."
+        )
+        return ConversationHandler.END
+
+    if field == "price":
+        try:
+            new_value = float(new_value)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ قیمت نامعتبر است. لطفاً فقط عدد وارد کنید."
+            )
+            return UPDATE_GET_VALUE
+
+    success = db.update_alert_field(alert_id, field, new_value)
+    if not success:
+        await update.message.reply_text("❌ خطا در به‌روزرسانی دیتابیس.")
+        return ConversationHandler.END
+
+    stop_alarm_task(alert_id)
+    updated_alert = db.get_alert_by_id(user_id, alert_id)
+
+    if updated_alert:
+        await start_alarm_task(context.application, updated_alert)
+        await update.message.reply_text(
+            "✅ آلارم با موفقیت به‌روزرسانی شد و در حال اجراست!"
+        )
+        msg_logger.info(
+            f"UPDATED -> Alert ID: {alert_id}, Field: {field}, User: {user_id}"
+        )
+    else:
+        await update.message.reply_text("❌ خطا در ری‌استارت کردن تسک پس‌زمینه.")
+
+    context.user_data.clear()
     await start(update, context)
     return ConversationHandler.END
 
@@ -563,10 +662,8 @@ async def save_alert_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if alert_id:
         full_alert_data = db.get_alert_by_id(context.user_data["user_id"], alert_id)
         await start_alarm_task(context.application, full_alert_data)
-        await update.message.reply_text(
-            f"✅ آلارم با موفقیت ایجاد شد!\n\n{AlertManager.format_alert_details(context.user_data)}",
-            parse_mode="Markdown",
-        )
+        message_text = f"✅ آلارم با موفقیت ایجاد شد!\n\n{AlertManager.format_alert_details(context.user_data)}"
+        await update.message.reply_text(message_text)
     else:
         await update.message.reply_text("❌ خطا در ذخیره آلارم. لطفاً دوباره تلاش کنید.")
 
@@ -581,7 +678,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- Post-Init Function for Persistence ---
 async def post_init(application: Application):
     logger.info("--- Bot initialization complete ---")
     logger.info("--- Reloading active alarms from database ---")
@@ -620,8 +716,21 @@ def main():
             VIEW_ALERT: [
                 CallbackQueryHandler(view_alert_details_handler, pattern="^alert_")
             ],
+            VIEW_ALERT_DETAILS: [
+                CallbackQueryHandler(alert_actions_handler, pattern="^(delete|update)_")
+            ],
             DELETE_CONFIRMATION: [
-                CallbackQueryHandler(delete_confirmation_handler, pattern="^delete_")
+                CallbackQueryHandler(
+                    delete_confirmation_handler, pattern="^confirm_delete_"
+                )
+            ],
+            UPDATE_SELECTION: [
+                CallbackQueryHandler(update_selection_handler, pattern="^update_field_")
+            ],
+            UPDATE_GET_VALUE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND, update_get_value_handler
+                )
             ],
             ALERT_TYPE: [
                 CallbackQueryHandler(alert_type_handler, pattern="^alert_price$")
@@ -637,6 +746,9 @@ def main():
             ],
         },
         fallbacks=[
+            CallbackQueryHandler(
+                view_alert_details_handler, pattern="^back_to_details_"
+            ),
             CallbackQueryHandler(start, pattern="^back_to_main$"),
             CommandHandler("cancel", cancel),
         ],

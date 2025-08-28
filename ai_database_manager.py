@@ -3,7 +3,6 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 # A list of columns that are safe to be queried directly.
-# This is a security measure to prevent SQL injection.
 ALLOWED_QUERY_FIELDS = [
     "id",
     "user_id",
@@ -18,6 +17,9 @@ ALLOWED_QUERY_FIELDS = [
     "trigger_count",
     "last_message_id",
 ]
+
+# Whitelist of fields that users are allowed to update.
+UPDATABLE_ALERT_FIELDS = ["price", "alert_description"]
 
 
 class DatabaseManager:
@@ -64,9 +66,7 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def add_user(
-        self, user_id: int, username: str, first_name: str, is_allowed: bool
-    ):
+    def add_user(self, user_id: int, username: str, first_name: str, is_allowed: bool):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -79,7 +79,6 @@ class DatabaseManager:
             conn.commit()
 
     def save_alert(self, alert_data: Dict[str, Any]) -> Optional[int]:
-        # Basic validation to ensure required fields are present
         required_fields = ["user_id", "alert_type", "pair", "price"]
         if not all(field in alert_data for field in required_fields):
             print("Error: Missing required fields in alert_data")
@@ -100,17 +99,14 @@ class DatabaseManager:
                     alert_data.get("pair"),
                     alert_data.get("timeframe"),
                     alert_data.get("price"),
-                    alert_data.get("candle_slope"),  # Safely get candle_slope
+                    alert_data.get("candle_slope"),
                     datetime.now(),
                 ),
             )
             conn.commit()
-            return cursor.lastrowid  # Return the ID of the new alert
+            return cursor.lastrowid
 
-    def update_alert_trigger_info(
-        self, alert_id: int, message_id: int
-    ):
-        """Increments the trigger count and updates the last message ID for an alert."""
+    def update_alert_trigger_info(self, alert_id: int, message_id: int):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -125,27 +121,33 @@ class DatabaseManager:
             )
             conn.commit()
 
+    def update_alert_field(self, alert_id: int, field: str, value: Any) -> bool:
+        """Safely updates a single field for a given alert."""
+        if field not in UPDATABLE_ALERT_FIELDS:
+            # Security check to prevent SQL injection
+            raise ValueError(f"Attempted to update a non-updatable field: {field}")
+
+        query = f"UPDATE alerts SET {field} = ? WHERE id = ?"
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (value, alert_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
     def get_user_alerts(self, user_id: int, fields: List[str]) -> List[Dict]:
-        # --- SQL Injection Prevention ---
-        # Validate every field against a whitelist before building the query.
         for field in fields:
             if field not in ALLOWED_QUERY_FIELDS:
                 raise ValueError(f"Disallowed field in query: {field}")
 
-        query = f"""
-            SELECT {", ".join(fields)} FROM alerts
-            WHERE user_id = ? AND is_active = 1
-            ORDER BY created_at DESC
-        """
+        query = f"SELECT {', '.join(fields)} FROM alerts WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC"
         with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row  # Makes rows accessible by column name
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(query, (user_id,))
-            # Convert rows to dictionaries for easier use
             return [dict(row) for row in cursor.fetchall()]
 
     def get_all_active_alerts(self) -> List[Dict]:
-        """Fetches all active alerts from the database, used for persistence on restart."""
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -157,8 +159,7 @@ class DatabaseManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM alerts WHERE user_id = ? AND id = ?",
-                (user_id, alert_id),
+                "SELECT * FROM alerts WHERE user_id = ? AND id = ?", (user_id, alert_id)
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -174,29 +175,3 @@ class DatabaseManager:
             if cursor.rowcount > 0:
                 return True, f"آلارم با شناسه {alert_id} با موفقیت حذف شد."
             return False, "آلارم یافت نشد یا قبلاً حذف شده است."
-
-    def delete_all_user_alerts(self, user_id: int) -> Tuple[bool, str, int]:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE alerts SET is_active = 0 WHERE user_id = ? AND is_active = 1",
-                (user_id,),
-            )
-            deleted_count = cursor.rowcount
-            conn.commit()
-            if deleted_count > 0:
-                return (
-                    True,
-                    f"{deleted_count} آلارم با موفقیت حذف شدند.",
-                    deleted_count,
-                )
-            return False, "هیچ آلارم فعالی برای حذف یافت نشد.", 0
-
-    def get_alert_count(self, user_id: int) -> int:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1",
-                (user_id,),
-            )
-            return cursor.fetchone()[0]

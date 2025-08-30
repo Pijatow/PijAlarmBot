@@ -15,6 +15,7 @@ DB_FILE = "alerts.db"
 
 # --- API Configuration ---
 BITUNIX_API_URL = "https://fapi.bitunix.com/api/v1"
+BITUNIX_WS_URL = "wss://fapi.bitunix.com/public/"
 
 # --- Localization & Timezone ---
 TIMEZONE = timezone(timedelta(hours=3, minutes=30))  # Asia/Tehran
@@ -23,3 +24,7 @@ TIMEZONE = timezone(timedelta(hours=3, minutes=30))  # Asia/Tehran
 # A dictionary to hold references to running alarm tasks
 # The key is the alert_id and the value is the asyncio.Task object
 ACTIVE_ALARM_TASKS = {}
+
+# A dictionary to hold the latest prices from the WebSocket stream
+# The key is the pair (e.g., 'BTCUSDT') and the value is the float price
+LATEST_PRICES = {}

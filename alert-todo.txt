@@ -1,20 +1,9 @@
-main2.py todo
----
-
-implement api_manager
-
-refactor alarm->alert
-handle permissions
-
+permissions
 candle slope(incremental, decremental)
-
-
-
 testing
 excel
 interval and algorithm
 rsi
 
 candle alarm
-the bot bugging out(some times buttons glitch and not work)
 websocket

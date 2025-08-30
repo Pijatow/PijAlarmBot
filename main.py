@@ -1,5 +1,5 @@
 import os
-
+import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -12,6 +12,7 @@ from telegram.ext import (
 )
 
 import config
+from api_manager import ws_client
 from bot.handlers import (
     start,
     new_alarm_command,
@@ -45,13 +46,20 @@ db = DatabaseManager(config.DB_FILE)
 
 async def post_init(application: Application):
     logger.info("--- Bot initialization complete ---")
-    logger.info("--- Reloading active alarms from database ---")
+    logger.info("--- Reloading active alerts from database ---")
+
     active_alerts = db.get_all_active_alerts()
+    # Subscribe to all unique pairs from active alerts
+    all_pairs = {alert["pair"] for alert in active_alerts}
+    for pair in all_pairs:
+        ws_client.add_subscription(pair)
+    logger.info(f"--- Queued WS subscriptions for {len(all_pairs)} unique pairs ---")
+
     count = 0
     for alert in active_alerts:
         await start_alarm_task(application, alert)
         count += 1
-    logger.info(f"--- Successfully reloaded {count} active alarms ---")
+    logger.info(f"--- Successfully reloaded {count} active alerts ---")
 
 
 def main():
@@ -124,7 +132,12 @@ def main():
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("help", help_command))
 
-    logger.info("🟡 CryptoAlarmBot started successfully! Starting polling...")
+    loop = asyncio.get_event_loop()
+    # Start the WebSocket client in the background
+    loop.create_task(ws_client.run())
+    logger.info("BACKGROUND: Bitunix WebSocket client started.")
+
+    logger.info("🟡 CryptoAlertBot started successfully! Starting polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

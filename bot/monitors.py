@@ -6,6 +6,7 @@ from telegram.error import BadRequest
 
 import config
 from api_manager import ws_client
+from bot.data_fetcher import get_kline_data, calculate_rsi
 from database_manager import DatabaseManager
 from logging_config import logger, api_logger, msg_logger
 from bot.ui import AlertManager
@@ -26,19 +27,87 @@ async def start_alarm_task(application: Application, alert_data: Dict[str, Any])
         logger.error(f"Attempted to start task for alert with no ID: {alert_data}")
         return
 
-    # Ensure we have a WebSocket subscription for this pair
-    ws_client.add_subscription(alert_data["pair"])
+    alert_type = alert_data.get("alert_type")
 
-    if alert_data["alert_type"] == "alert_price":
+    if alert_type == "alert_price":
+        # Ensure we have a WebSocket subscription for this pair
+        ws_client.add_subscription(alert_data["pair"])
         task = asyncio.create_task(price_alert_monitor(application, alert_data))
+    elif alert_type == "alert_rsi":
+        task = asyncio.create_task(rsi_alert_monitor(application, alert_data))
     else:
-        logger.warning(
-            f"Unsupported alert_type for task start: {alert_data['alert_type']}"
-        )
+        logger.warning(f"Unsupported alert_type for task start: {alert_type}")
         return
 
     config.ACTIVE_ALARM_TASKS[alert_id] = task
-    logger.info(f"Started alert task for alert_id: {alert_id}")
+    logger.info(f"Started '{alert_type}' task for alert_id: {alert_id}")
+
+
+async def rsi_alert_monitor(application: Application, alert_data: Dict[str, Any]):
+    user_id = alert_data["user_id"]
+    alert_id = alert_data["id"]
+    pair = alert_data["pair"]
+    timeframe = alert_data["timeframe"]
+    rsi_period = alert_data["rsi_period"]
+    rsi_condition = alert_data["rsi_condition"]
+    rsi_threshold = float(alert_data["price"])  # Using 'price' column for threshold
+
+    while True:
+        try:
+            current_alert_state = db.get_alert_by_id(user_id, alert_id)
+            if not current_alert_state or not current_alert_state["is_active"]:
+                logger.info(f"Alert {alert_id} is no longer active. Stopping task.")
+                stop_alarm_task(alert_id)
+                break
+
+            closing_prices = get_kline_data(pair, timeframe, limit=rsi_period + 100)
+
+            if closing_prices:
+                current_rsi = calculate_rsi(closing_prices, rsi_period)
+                if current_rsi is not None:
+                    triggered, reason = False, ""
+
+                    if rsi_condition == "above" and current_rsi > rsi_threshold:
+                        triggered = True
+                        reason = (
+                            f"📈 RSI ({current_rsi:.2f}) از {rsi_threshold} بالاتر رفت!"
+                        )
+                    elif rsi_condition == "below" and current_rsi < rsi_threshold:
+                        triggered = True
+                        reason = f"📉 RSI ({current_rsi:.2f}) از {rsi_threshold} پایین تر آمد!"
+
+                    if triggered:
+                        # To prevent spamming, we will temporarily disable the alert after it triggers.
+                        # A more advanced implementation might re-enable it after a cooldown.
+                        db.update_alert_field(alert_id, "is_active", 0)
+
+                        new_trigger_count = (
+                            current_alert_state.get("trigger_count", 0) + 1
+                        )
+                        msg_text = AlertManager.format_trigger_message(
+                            current_alert_state,
+                            reason,
+                            current_rsi,
+                            new_trigger_count,
+                        )
+                        await application.bot.send_message(user_id, msg_text)
+                        logger.info(
+                            f"TRIGGERED (RSI) -> Alert ID: {alert_id} for User: {user_id}. Reason: {reason}"
+                        )
+
+                        # Since this alert type is now disabled, we stop the monitor task.
+                        stop_alarm_task(alert_id)
+                        break
+
+            # Check frequency based on timeframe to be efficient
+            await asyncio.sleep(60)  # Check every minute
+
+        except Exception as e:
+            logger.exception(
+                f"UNEXPECTED ERROR in rsi_alert_monitor for alert {alert_id}:"
+            )
+            stop_alarm_task(alert_id)
+            break
 
 
 async def price_alert_monitor(application: Application, alert_data: Dict[str, Any]):
@@ -85,7 +154,7 @@ async def price_alert_monitor(application: Application, alert_data: Dict[str, An
                     new_message = None
 
                     logger.info(
-                        f"TRIGGERED -> Alert ID: {alert_id} for User: {user_id}. Reason: {reason}"
+                        f"TRIGGERED (Price) -> Alert ID: {alert_id} for User: {user_id}. Reason: {reason}"
                     )
 
                     if last_message_id:

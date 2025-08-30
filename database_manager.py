@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 # A list of columns that are safe to be queried directly.
+# I've added the new RSI fields to this whitelist.
 ALLOWED_QUERY_FIELDS = [
     "id",
     "user_id",
@@ -16,9 +17,13 @@ ALLOWED_QUERY_FIELDS = [
     "candle_slope",
     "trigger_count",
     "last_message_id",
+    "rsi_period",
+    "rsi_condition",
+    "rsi_threshold",
 ]
 
 # Whitelist of fields that users are allowed to update.
+# RSI alerts are not editable for now, so this list remains unchanged.
 UPDATABLE_ALERT_FIELDS = ["price", "alert_description"]
 
 
@@ -43,13 +48,16 @@ class DatabaseManager:
                     alert_type TEXT NOT NULL,
                     pair TEXT NOT NULL,
                     timeframe TEXT,
-                    price REAL NOT NULL,
+                    price REAL,
                     candle_slope TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_triggered TIMESTAMP,
                     trigger_count INTEGER DEFAULT 0,
                     last_message_id INTEGER,
-                    is_active BOOLEAN DEFAULT 1
+                    is_active BOOLEAN DEFAULT 1,
+                    rsi_period INTEGER,
+                    rsi_condition TEXT,
+                    rsi_threshold REAL
                 )
             """
             )
@@ -79,7 +87,8 @@ class DatabaseManager:
             conn.commit()
 
     def save_alert(self, alert_data: Dict[str, Any]) -> Optional[int]:
-        required_fields = ["user_id", "alert_type", "pair", "price"]
+        # Price is not required for RSI alerts, so we adjust the check
+        required_fields = ["user_id", "alert_type", "pair"]
         if not all(field in alert_data for field in required_fields):
             print("Error: Missing required fields in alert_data")
             return None
@@ -89,8 +98,9 @@ class DatabaseManager:
             cursor.execute(
                 """
                 INSERT INTO alerts
-                (user_id, alert_description, alert_type, pair, timeframe, price, candle_slope, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, alert_description, alert_type, pair, timeframe, price, candle_slope, created_at,
+                 rsi_period, rsi_condition, rsi_threshold)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     alert_data.get("user_id"),
@@ -101,6 +111,9 @@ class DatabaseManager:
                     alert_data.get("price"),
                     alert_data.get("candle_slope"),
                     datetime.now(),
+                    alert_data.get("rsi_period"),
+                    alert_data.get("rsi_condition"),
+                    alert_data.get("rsi_threshold"),
                 ),
             )
             conn.commit()
@@ -124,11 +137,9 @@ class DatabaseManager:
     def update_alert_field(self, alert_id: int, field: str, value: Any) -> bool:
         """Safely updates a single field for a given alert."""
         if field not in UPDATABLE_ALERT_FIELDS:
-            # Security check to prevent SQL injection
             raise ValueError(f"Attempted to update a non-updatable field: {field}")
 
         query = f"UPDATE alerts SET {field} = ? WHERE id = ?"
-
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(query, (value, alert_id))

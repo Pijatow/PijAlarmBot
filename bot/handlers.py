@@ -1,3 +1,4 @@
+import asyncio
 from textwrap import dedent
 
 import requests
@@ -8,12 +9,61 @@ from telegram.ext import ContextTypes, ConversationHandler
 import config
 from bot.monitors import stop_alarm_task, start_alarm_task
 from bot.ui import AlertManager
-from bot.utils import translate_alert_type, is_valid_pair
+from bot.utils import translate_alert_type, is_valid_pair, parse_duration
 from .constants import *
 from database_manager import DatabaseManager
 from logging_config import msg_logger, api_logger, logger
 
 db = DatabaseManager(config.DB_FILE)
+
+
+async def _send_reminder(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, seconds: int, message: str
+):
+    """Waits for a specified duration and then sends the reminder message."""
+    await asyncio.sleep(seconds)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=f"⏰ یادآوری:\n\n{message}"
+    )
+    msg_logger.info(
+        f"OUTGOING (Reminder) -> User: {update.effective_user.id}, Message: {message}"
+    )
+
+
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets a reminder for the user."""
+    user_id = update.effective_user.id
+    msg_logger.info(f"INCOMING -> User: {user_id}, Command: /remind")
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "دستور استفاده: /remind <زمان> <پیام>\n\n"
+            "مثال: /remind 1h30m چک کردن فر\n"
+            "واحد های زمانی: h (ساعت)، m (دقیقه)، s (ثانیه)"
+        )
+        return
+
+    duration_str = context.args[0]
+    reminder_message = " ".join(context.args[1:])
+
+    seconds = parse_duration(duration_str)
+
+    if seconds <= 0:
+        await update.message.reply_text(
+            "فرمت زمان وارد شده معتبر نیست.\n\n"
+            "مثال: /remind 1h30m چک کردن فر\n"
+            "واحد های زمانی: h (ساعت)، m (دقیقه)، s (ثانیه)"
+        )
+        return
+
+    asyncio.create_task(_send_reminder(update, context, seconds, reminder_message))
+
+    await update.message.reply_text(
+        f"✅ ثبت شد! تا {duration_str} دیگر به شما یادآوری می‌شود."
+    )
+    msg_logger.info(
+        f"SET Reminder -> User: {user_id}, Duration: {seconds}s, Message: {reminder_message}"
+    )
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,6 +149,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         /new_alarm - شروع فرآیند ایجاد یک آلارم جدید
         /list_alarms - نمایش تمام آلارم‌های فعال شما
         /summary - نمایش قیمت لحظه‌ای ارزهای منتخب
+        /remind <زمان> <پیام> - تنظیم یک یادآوری ساده (مثال: /remind 1h30m پیام تست)
 
         در طول فرآیندها:
         /cancel - لغو عملیات فعلی (مانند ساخت آلارم)

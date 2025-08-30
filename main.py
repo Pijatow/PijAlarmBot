@@ -30,6 +30,7 @@ from bot.handlers import (
     cancel,
     summary_command,
     help_command,
+    remind_command,
 )
 from bot.monitors import start_alarm_task
 from bot.constants import *
@@ -131,6 +132,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("remind", remind_command))
 
     loop = asyncio.get_event_loop()
     # Start the WebSocket client in the background

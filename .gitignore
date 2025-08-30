@@ -1,7 +1,7 @@
 *
 !migrations/
 !migrations/*
-!ai_database_manager.py
+!database_manager.py
 !ai_telbot_alarm.py
 !logging_config.py
 !config.py

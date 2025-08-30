@@ -9,7 +9,7 @@ from textwrap import dedent
 
 # Import configurations and the new logging setup
 import config
-from ai_database_manager import DatabaseManager
+from database_manager import DatabaseManager
 from logging_config import logger, msg_logger, api_logger
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup

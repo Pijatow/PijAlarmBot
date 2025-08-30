@@ -1,12 +1,17 @@
-*
-!migrations/
-!migrations/*
-!database_manager.py
-!ai_telbot_alarm.py
-!logging_config.py
-!config.py
-!yoyo.ini
-!LICENSE
+# *
+# !migrations/
+# !migrations/*
+# !database_manager.py
+# !ai_telbot_alarm.py
+# !logging_config.py
+# !config.py
+# !yoyo.ini
+# !LICENSE
+
+*.db
+.vscode
+logs
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

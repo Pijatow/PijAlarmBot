@@ -39,7 +39,7 @@ from database_manager import DatabaseManager
 from logging_config import logger
 
 # --- Proxy Settings ---
-os.environ["http_proxy"] = "http://12z7.0.0.1:10808"
+os.environ["http_proxy"] = "http://127.0.0.1:10808"
 os.environ["https_proxy"] = "http://127.0.0.1:10808"
 
 # --- Database Initialization ---
